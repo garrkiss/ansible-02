@@ -1,0 +1,94 @@
+---
+- name: Install Clickhouse
+  hosts: clickhouse
+  handlers:
+    - name: Start clickhouse service
+      become: true
+      ansible.builtin.service:
+        name: clickhouse-server
+        state: restarted
+  tasks:
+    - block:
+        - name: Get clickhouse distrib
+          ansible.builtin.get_url:
+            url: "https://packages.clickhouse.com/rpm/stable/{{ item }}-{{ clickhouse_version }}.noarch.rpm"
+            dest: "./{{ item }}-{{ clickhouse_version }}.rpm"
+          with_items: "{{ clickhouse_packages }}"
+      rescue:
+        - name: Get clickhouse distrib
+          ansible.builtin.get_url:
+            url: "https://packages.clickhouse.com/rpm/stable/clickhouse-common-static-{{ clickhouse_version }}.x86_64.rpm"
+            dest: "./clickhouse-common-static-{{ clickhouse_version }}.rpm"
+    - name: Install clickhouse packages
+      become: true
+      ansible.builtin.yum:
+        name:
+          - clickhouse-common-static-{{ clickhouse_version }}.rpm
+          - clickhouse-client-{{ clickhouse_version }}.rpm
+          - clickhouse-server-{{ clickhouse_version }}.rpm
+        disable_gpg_check: true
+      notify: Start clickhouse service
+    - name: Flush handlers
+      meta: flush_handlers
+    - name: Pause for 60 s
+      pause:
+       seconds: 60
+    - name: Create database
+      ansible.builtin.command: "clickhouse-client -q 'create database logs;'"
+      register: create_db
+      failed_when: create_db.rc != 0 and create_db.rc !=82
+      changed_when: create_db.rc == 0
+
+- name: Install and configure Vector
+  hosts: vector
+  become: true
+
+  vars:
+   install_dir: "/opt/vector"
+   config_dir: "/etc/vector"
+   config_file: "{{ config_dir }}/vector.toml"
+
+  tasks:
+    - name: Ensure installation directory exists
+      ansible.builtin.file:
+        path: "{{ install_dir }}"
+        state: directory
+        mode: '0755'
+
+    - name: Ensure configuration directory exists
+      ansible.builtin.file:
+        path: "{{ config_dir }}"
+        state: directory
+        mode: '0755'
+
+    - name: Download Vector binary
+      ansible.builtin.get_url:
+        url: "https://packages.timber.io/vector/0.31.0/vector-0.31.0-x86_64-unknown-linux-gnu.tar.gz"
+        dest: "/tmp/vector-0.31.0.tar.gz"
+
+    - name: Extract Vector binary
+      ansible.builtin.unarchive:
+        src: "/tmp/vector-0.31.0.tar.gz"
+        dest: "{{ install_dir }}"
+        remote_src: true
+
+    - name: Copy Vector binary to system path
+      ansible.builtin.copy:
+        src: "{{ install_dir }}/vector-x86_64-unknown-linux-gnu/bin/vector"
+        dest: "/usr/local/bin/vector"
+        remote_src: true
+        mode: '0755'
+
+    - name: Deploy Vector configuration
+      ansible.builtin.template:
+        src: "./template/vector.yaml.j2"
+        dest: "{{ config_file }}"
+        mode: '0644'
+
+    - name: Reload systemd
+      ansible.builtin.systemd:
+        daemon_reload: yes
+         
+    - name: Run Vector
+      become: true
+      ansible.builtin.shell: /usr/local/bin/vector/vector --config /etc/vector/vector.toml &
